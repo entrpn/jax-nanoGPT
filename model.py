@@ -11,7 +11,7 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.1
-    dtype = jnp.bfloat16
+    dtype = jnp.float32
 
 def new_gelu(x):
     return 0.5 * x * (1.0 + jnp.tanh(math.sqrt(2.0 / math.pi) * (x * 0.044715 * jnp.power(x, 3.0))))
@@ -73,9 +73,7 @@ class Block(nn.Module):
         self.mlp = MLP(self.config)
 
     def __call__(self, x, train=True):
-        print('block, x.shape:',x.shape)
         x = self.ln_1(x)
-        print('x.shape',x.shape)
         x = x + self.attn(self.ln_1(x), train=train)
         x = x + self.mlp(self.ln_2(x), train)
         return x
@@ -91,20 +89,21 @@ class GPT(nn.Module):
         self.lm_head = nn.Dense(self.config.vocab_size, dtype=self.config.dtype, use_bias=False)
     
     def __call__(self, idx, targets=None, train=True):
-        print('idx.shape:',idx.shape)
         b, t = idx.shape
         assert t <=self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = jnp.expand_dims(jnp.arange(0,t,dtype=jnp.int64),0)
+        pos = jnp.expand_dims(jnp.arange(0,t,dtype=jnp.int32),0)
 
         tok_emb = self.wte(idx)
         pos_emb = self.wpe(pos)
-        print('tok_emb.shape:',tok_emb.shape)
-        print('pos_emb.shape:',pos_emb.shape)
         x = self.drop(tok_emb + pos_emb, deterministic=not train)
-        print('x.shape:',x.shape)
         for block in self.h:
             x = block(x,train)
-            print('after block for loop x',x.shape)
         
-        logits = self.lm_head(x[:,[-1],:])
+        x = self.ln_f(x)
+        # loss = None
+        # if targets is not None:
+        #     logits = self.lm_head(x)
+
+        #logits = self.lm_head(x[:,[-1],:])
+        logits = self.lm_head(x)
         return logits
