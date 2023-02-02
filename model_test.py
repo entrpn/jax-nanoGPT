@@ -17,7 +17,9 @@ print("Device:", jax.devices()[0])
 main_rng, x_rng = random.split(main_rng)
 config = GPTConfig(vocab_size=100,n_layer=2, n_embd=32,n_head=8, block_size=20)
 config = GPTConfig()
-x = random.randint(x_rng, (8, config.block_size, config.n_embd), minval=0,maxval=config.vocab_size)
+# config.block_size = 10
+# config.
+x = random.normal(x_rng, (1, config.block_size, config.n_embd))
 print(x.shape)
 attn = CausalSelfAttention(config)
 main_rng, init_rng, dropout_init_rng = random.split(main_rng, 3)
