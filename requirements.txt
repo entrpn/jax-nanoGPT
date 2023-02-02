@@ -1,0 +1,7 @@
+jax
+flax
+torch
+optax
+tiktoken
+tqdm
+datasets

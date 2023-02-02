@@ -3,7 +3,6 @@ import jax
 from jax import random
 import jax.numpy as jnp
 import optax
-import torch
 import numpy as np
 
 import tiktoken
