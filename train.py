@@ -35,11 +35,13 @@ def get_train_config(train_config_name):
     if train_config_name == 'shakespeare':
         train_config = shakespeare_config
     return train_config
-    
+
+def count_params(params) -> int:
+    p = jax.tree_util.tree_map(lambda a: a.size if isinstance(a, jnp.ndarray) else 0, params)
+    return jax.tree_util.tree_reduce(lambda a, b: a + b, p)
 
 def train(opt):
-    seed = 42
-    rng = jax.random.PRNGKey(seed)
+    seed = 250
     config = GPTConfig()
 
     train_config = get_train_config(opt.config)
@@ -48,12 +50,6 @@ def train(opt):
     config.n_head = model_config['n_head']
     config.n_embd = model_config['n_embd']
     config.block_size = train_config['block_size']
-
-    class TrainState(train_state.TrainState):
-        dropout_rng: jnp.ndarray
-
-        def replicate(self):
-            return jax_utils.replicate(self).replace(dropout_rng=shard_prng_key(self.dropout_rng))
 
     # Eval
     out_dir = train_config['out_dir']
@@ -89,18 +85,15 @@ def train(opt):
     iter_num = 0
 
     # Training
-    rng, dropout_rng = jax.random.split(rng)
-    rng, input_rng = jax.random.split(rng)
+    rng = jax.random.PRNGKey(seed)
     rng, init_rng = jax.random.split(rng)
-    num_epochs = 600
     train_batch_size = batch_size * jax.device_count()
-    per_device_eval_batch_size = int(batch_size)
-    eval_batch_size = per_device_eval_batch_size * jax.device_count()
     input_shape = (batch_size, config.block_size)
     model = GPT(config)
     main_rng, init_rng, dropout_init_rng = jax.random.split(rng, 3)
-    x = jax.random.randint(init_rng, input_shape, minval=0,maxval=config.vocab_size)
-    params = model.init({'params' : init_rng, 'dropout' : dropout_init_rng}, x, train=True)['params']
+    params = jax.jit(model.init)({'params' : init_rng, 'dropout' : dropout_init_rng}, jax.random.randint(init_rng, input_shape, minval=0,maxval=config.vocab_size))
+    # params = model.init(init_rng)
+    print("Number of params : ",count_params(params))
     # Optimizer
     # learning rate decay settings
     learning_rate= train_config['learning_rate']
@@ -113,7 +106,7 @@ def train(opt):
         return optax.warmup_cosine_decay_schedule(
                 init_value=0,
                 peak_value=learning_rate,
-                warmup_steps=warmup_iters,
+                warmup_steps=2000,
                 decay_steps=lr_decay_iters,
                 end_value=min_lr
             )
@@ -133,19 +126,23 @@ def train(opt):
         return retval
 
     learning_rate_fn = create_learning_rate_schedule()
-    adamw_mask = create_adamw_mask(params)
+    decay_mask = create_adamw_mask(params)
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
+        optax.add_decayed_weights(1e-2, mask=decay_mask),
         optax.adamw(
             learning_rate=learning_rate_fn,
-            b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-2,
-            mask=adamw_mask
+            b1=0.9, b2=0.95, eps=1e-8
         )
     )
-    state = TrainState.create(apply_fn=model.apply, params=unfreeze(params), tx=optimizer, dropout_rng=dropout_rng)
+    state = train_state.TrainState.create(
+        apply_fn=model.apply, 
+        params=unfreeze(params), 
+        tx=optimizer)
 
-    rng = jax.random.PRNGKey(seed)
-    train_rngs = jax.random.split(rng, jax.local_device_count())
+    del params
+
+    state = jax_utils.replicate(state)
 
     def generate(idx, model, params, config, max_new_tokens,temperature=1.0,top_k=None):
         for _ in range(max_new_tokens):
@@ -184,12 +181,12 @@ def train(opt):
         return out
 
 
-    def train_step(state, batch, train_rng):
+    def train_step(state, batch, dropout_rng=None):
         inputs, targets = batch
-        dropout_rng, new_train_rng = jax.random.split(train_rng)
+        dropout_rng = jax.random.fold_in(dropout_rng, state.step)
 
         def compute_loss(params):
-            logits = model.apply({'params': state.params}, inputs, train=True, rngs={'dropout' : dropout_rng})
+            logits = state.apply_fn({'params': params['params']}, inputs, train=True, rngs={'dropout' : dropout_rng})
             loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets).mean()
             return loss
         
@@ -200,57 +197,48 @@ def train(opt):
         metrics = {"loss" : loss}
         metrics = jax.lax.pmean(metrics, axis_name="batch")
 
-        return new_state, metrics, new_train_rng
+        return new_state, metrics
 
 
     p_train_step = jax.pmap(train_step, "batch", donate_argnums=(0,))
     p_eval_step = jax.pmap(eval_step, "batch")
-    state = jax_utils.replicate(state)
 
-    train_time = 0
-    epochs = tqdm(range(num_epochs), desc=f"Epoch ... (1/{num_epochs})", position=0)
+    dropout_rngs = jax.random.split(rng, jax.local_device_count())
 
-    for epoch in epochs:
-        train_start = time.time()
+    for _ in range(max_iters):
         rng, input_rng = jax.random.split(rng)
-        steps_per_epoch = int(max_iters // num_epochs)
-        # train
-        for _ in tqdm(range(steps_per_epoch), desc="Training...", position=1, leave=False):
-            # eval
-            if iter_num % eval_interval == 0:
-                eval_metrics = evaluate(rng, p_eval_step, state.params)
-                train_loss = jax.device_get(eval_metrics['train'])
-                val_loss = jax.device_get(eval_metrics['val'])
-                writer.add_scalar('train/loss', train_loss,global_step=iter_num)
-                writer.add_scalar('val/loss', val_loss,global_step=iter_num)
-                lr = jax.device_get(unreplicate(learning_rate_fn(state.step)))
-                writer.add_scalar('lr', lr,global_step=iter_num)
-                if val_loss < best_eval:
-                    best_eval = val_loss
-                    save_model(unreplicate(state).params, step=iter_num)
-                writer.flush()
-            # Generate single example
-            if iter_num % gen_interval == 0:
-                x,_ = get_batch('train',input_rng, 1)
-                generation = generate(x,model,unreplicate(state).params,config,50)
-                generation = generation.squeeze()[-50:]
-                generation = enc.decode(generation)
-                log_generations(generation, iter_num)
-                writer.flush()
 
-            # Train
-            rng, input_rng = jax.random.split(rng)
-            batch = get_batch('train',input_rng, train_batch_size)
-            batch = shard(batch)
-            state, train_metric, train_rngs = p_train_step(state, batch, train_rngs)
-            iter_num+=1
-            
-        train_time += time.time() - train_start
+        # Generate single example
+        if iter_num % gen_interval == 0:
+            x,_ = get_batch('train',input_rng, 1)
+            generation = generate(x,model,unreplicate(state).params['params'],config,50)
+            generation = generation.squeeze()
+            generation = enc.decode(generation)
+            log_generations(generation, iter_num)
+            writer.flush()
+
+        # eval
+        if iter_num % eval_interval == 0:
+            eval_metrics = evaluate(rng, p_eval_step, state.params['params'])
+            train_loss = jax.device_get(eval_metrics['train'])
+            val_loss = jax.device_get(eval_metrics['val'])
+            writer.add_scalar('train/loss', train_loss,global_step=iter_num)
+            writer.add_scalar('val/loss', val_loss,global_step=iter_num)
+            lr = jax.device_get(unreplicate(learning_rate_fn(state.step)))
+            writer.add_scalar('lr', lr,global_step=iter_num)
+            if val_loss < best_eval:
+                best_eval = val_loss
+                save_model(unreplicate(state).params, step=iter_num)
+            writer.flush()
+
+        # Train
+        batch = get_batch('train',input_rng, train_batch_size)
+        batch = shard(batch)
+        state, train_metric = p_train_step(state, batch, dropout_rngs)
+        
         train_metric = unreplicate(train_metric)
-        epochs.write(
-            f"Epoch... ({epoch + 1}/{num_epochs} | Loss: {train_metric['loss']}, Learning Rate:"
-            f" {learning_rate_fn(state.step)})"
-        )
+        print(f" iter {iter_num}, loss : {train_metric['loss']}, lr: {learning_rate_fn(state.step)}")
+        iter_num+=1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

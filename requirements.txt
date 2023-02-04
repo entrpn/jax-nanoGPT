@@ -5,3 +5,4 @@ optax
 tiktoken
 tqdm
 datasets
+tensorboard
