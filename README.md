@@ -35,7 +35,14 @@ Tensorboard logs will be stored in out-{dataset-name} with train/eval loss, lear
 
 ## Examples
 
-Training with the shakespeare dataset for 9600 steps.
+Training with openwebtext10k dataset for 25k steps, where the last 50 characters in the text are generated.
+
+<p align="center">
+    <img src="images/owt10k_generated.png"></img>
+    <img height="1000" src="images/owt10k.png"></img>
+</br>
+</br>
+<p align="center">Training with the shakespeare dataset for 9600 steps.</p>
 <p align="center">
     <img with="100" height="1000" src="images/logs.png"></img>
 </p>
