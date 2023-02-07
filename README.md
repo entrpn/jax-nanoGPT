@@ -1,6 +1,6 @@
 # jax-nanoGPT
 
-A replicate [nano-GPT](https://github.com/karpathy/nanoGPT) in JAX. This is still a work in progress and not complete.
+A replicate [nano-GPT](https://github.com/karpathy/nanoGPT) in JAX.
 
 ## Install
 
@@ -32,3 +32,10 @@ python train.py --config shakespeare
 ```
 
 Tensorboard logs will be stored in out-{dataset-name} with train/eval loss, learning rate and sampled generations.
+
+## Examples
+
+Training with the shakespeare dataset for 9600 steps.
+<p align="center">
+    <img with="100" height="1000" src="images/logs.png"></img>
+</p>

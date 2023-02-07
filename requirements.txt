@@ -6,3 +6,4 @@ tiktoken
 tqdm
 datasets
 tensorboard
+orbax

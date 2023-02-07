@@ -39,6 +39,7 @@ class CausalSelfAttention(nn.Module):
         att = att / math.sqrt(q.shape[-1])
         # TODO - attention_masks for varying input lengths, perhaps use softmax where capability https://flax.readthedocs.io/en/latest/api_reference/_autosummary/flax.linen.activation.softmax.html
         att = jnp.where(mask == 0, -jnp.inf, att)
+        #print("mask att:", att)
         att = nn.softmax(att, axis=-1)
         att = self.attn_dropout(att, deterministic=not train)
         y = jnp.matmul(att, v)

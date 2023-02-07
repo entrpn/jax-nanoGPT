@@ -16,9 +16,11 @@ from flax.jax_utils import unreplicate
 from flax.training.common_utils import shard, shard_prng_key
 
 import optax
+import orbax.checkpoint as orbax
 
 from model import GPTConfig, GPT
 from configs.shakespeare import config as shakespeare_config
+from configs.openwebtext10k import config as openwebtext10k_config
 
 import tiktoken
 enc = tiktoken.get_encoding("gpt2")
@@ -34,6 +36,8 @@ def get_train_config(train_config_name):
     train_config = None
     if train_config_name == 'shakespeare':
         train_config = shakespeare_config
+    elif train_config_name == 'openwebtext-10k':
+        train_config = openwebtext10k_config
     return train_config
 
 def count_params(params) -> int:
@@ -61,11 +65,19 @@ def train(opt):
 
     # Checkpoints
     checkpoint_path = os.path.join(out_dir,'checkpoints')
-    def save_model(params, step=0):
-        checkpoints.save_checkpoint(ckpt_dir=checkpoint_path, target=params, prefix=f'gpt2',step=step,overwrite=True)
+    def restore_model(state, step=0):
+        state_restored = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_path, target=state, step=step)
+        return state_restored
+
+    def save_model(state, step=0):
+
+        ckpt = {'model' : state}
+        orbax_checkpointer = orbax.Checkpointer(orbax.PyTreeCheckpointHandler())
+
+        checkpoints.save_checkpoint(ckpt_dir=checkpoint_path, target=ckpt, prefix=f'checkpoint_',step=step,overwrite=True, keep=1, orbax_checkpointer=orbax_checkpointer)
 
     # Generate
-    gen_interval = train_config['gen_iters']
+    gen_interval = train_config['gen_interval']
     def log_generations(text, step):
         writer.add_text("generation",text,global_step=step)
 
@@ -144,22 +156,41 @@ def train(opt):
 
     state = jax_utils.replicate(state)
 
-    def generate(idx, model, params, config, max_new_tokens,temperature=1.0,top_k=None):
-        for _ in range(max_new_tokens):
+
+    def temperature_sample(idx, params, config, max_new_tokens,temperature=1.0, top_k=20, rng=jax.random.PRNGKey(0)):
+        sampling_loop_init_state = (jnp.array(0), idx, params, rng)
+        def select_top_k(tensor, k):
+            values, _ = jax.lax.top_k(tensor, k)
+            mask = tensor > values.min()
+            return mask, jnp.where(mask, tensor, 0.)
+        def log(t, eps = 1e-20):
+            return jnp.log(t + eps)
+        def gumbel_noise(rng, shape):
+            noise = jax.random.uniform(rng, shape = shape, minval = 0., maxval = 1.)
+            return -log(-log(noise))
+        def sampling_loop_cond_fn(state):
+            (i, _, _, _) = state
+            return i <= max_new_tokens
+
+        def sampling_loop_body_fn(state):
+            i, idx, params, rng = state
+            rng0, rng1 = jax.random.split(rng)
+            model = GPT(config)
+            logits = model.apply({'params' : params}, idx, train=False)
+            logits = logits[:,-1,:]
+            noise = gumbel_noise(rng0, logits.shape)
+            if top_k:
+                mask, logits = select_top_k(logits, top_k)
+                noise *= mask
+            
+            logits += noise
+            sampled_ind = np.argmax(logits, axis = -1)
+            idx = jnp.concatenate((idx, jnp.array([sampled_ind])), axis=1)
             idx_cond = idx if idx.shape[1] <= config.block_size else idx[:,-config.block_size:]
-            logits = model.apply({'params': params},idx_cond,train=False)
-            logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                v, _ = jax.lax.topk(logits, min(top_k, logits.shape[-1]))
-                logits[logits < v[:, [-1]]] = -jnp.inf
-            probs = jax.nn.softmax(logits)
-            # https://github.com/numpy/numpy/issues/8317
-            probs = probs.astype('float64')
-            probs = probs / probs.sum()
-            idx_next = np.random.multinomial(1,probs.squeeze().tolist())
-            idx_next = jnp.argmax(idx_next)
-            idx = jnp.concatenate((idx, jnp.array([[idx_next]])), axis=1)
-        return idx
+            return (i+1, idx_cond, params, rng1)
+
+        final_state = jax.lax.while_loop(sampling_loop_cond_fn, sampling_loop_body_fn, sampling_loop_init_state)
+        return final_state[1]
 
     def eval_step(params, batch):
         inputs, targets = batch
@@ -211,7 +242,7 @@ def train(opt):
         # Generate single example
         if iter_num % gen_interval == 0:
             x,_ = get_batch('train',input_rng, 1)
-            generation = generate(x,model,unreplicate(state).params['params'],config,50)
+            generation = temperature_sample(x, unreplicate(state).params['params'], config, max_new_tokens=50,temperature=1.0, top_k=20, rng=rng)
             generation = generation.squeeze()
             generation = enc.decode(generation)
             log_generations(generation, iter_num)
@@ -228,7 +259,11 @@ def train(opt):
             writer.add_scalar('lr', lr,global_step=iter_num)
             if val_loss < best_eval:
                 best_eval = val_loss
-                save_model(unreplicate(state).params, step=iter_num)
+                save_model(unreplicate(state), step=iter_num)
+                # Restore checkpoint to validate we can load checkpoints.
+                # state = restore_model(unreplicate(state), step=iter_num)
+                # state = jax_utils.replicate(state)
+
             writer.flush()
 
         # Train
@@ -246,7 +281,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default=None,
-        help="Config. Ex: shakespeare, openwebtext=10k or openwebtext"
+        help="Config. Ex: shakespeare, openwebtext-10k or openwebtext"
     )
     opt = parser.parse_args()
     train(opt)
