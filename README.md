@@ -16,7 +16,7 @@ If you want to use this code with TPUs, install:
 pip install "jax[tpu]>=0.2.16" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
-## Usage
+## Train
 
 To create a dataset run:
 
@@ -29,6 +29,14 @@ This will create a train.bin and val.bin which holds GPT2 BPE token ids in one s
 
 ```bash
 python train.py --config shakespeare
+```
+
+## Generate
+
+To generate text, use the `generate.py` script with the config that was used for training and the last checkpoint step that was saved.
+
+```bash
+python generate.py --config shakespeare --checkpoint-step 7500
 ```
 
 Tensorboard logs will be stored in out-{dataset-name} with train/eval loss, learning rate and sampled generations.
