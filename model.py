@@ -37,10 +37,8 @@ class CausalSelfAttention(nn.Module):
 
         att = jnp.matmul(q, jnp.swapaxes(k, -2, -1))
         att = att / math.sqrt(q.shape[-1])
-        # TODO - attention_masks for varying input lengths, perhaps use softmax where capability https://flax.readthedocs.io/en/latest/api_reference/_autosummary/flax.linen.activation.softmax.html
         att = jnp.where(mask == 0, -jnp.inf, att)
-        #print("mask att:", att)
-        att = nn.softmax(att, axis=-1)
+        att = jnp.nan_to_num(nn.softmax(att, axis=-1), copy=True, nan=0.0)
         att = self.attn_dropout(att, deterministic=not train)
         y = jnp.matmul(att, v)
         y = y.transpose(0, 2, 1, 3) # [Batch, SeqLen, Head, Dims]
@@ -87,12 +85,14 @@ class GPT(nn.Module):
         self.h = [Block(self.config) for _ in range(self.config.n_layer)]
         self.ln_f = nn.LayerNorm(epsilon=1e-05, dtype=self.config.dtype, use_bias=self.config.bias)
     
-    def __call__(self, idx, targets=None, train=True):
+    def __call__(self, idx, targets=None, train=True, pad_token=None):
         b, t = idx.shape
         assert t <=self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = jnp.expand_dims(jnp.arange(0,t,dtype=jnp.int32),0)
         attn_mask = nn.make_causal_mask(idx, dtype=bool)
-
+        if pad_token:
+            pad_mask = jnp.expand_dims(jnp.expand_dims((idx != pad_token),1),2)
+            attn_mask = (attn_mask & pad_mask)
         tok_emb = self.wte(idx)
         pos_emb = self.wpe(pos)
         x = self.drop(tok_emb + pos_emb, deterministic=not train)
