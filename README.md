@@ -16,7 +16,7 @@ If you want to use this code with TPUs, install:
 pip install "jax[tpu]>=0.2.16" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
-## Train
+## Train single node
 
 To create a dataset run:
 
@@ -30,6 +30,65 @@ This will create a train.bin and val.bin which holds GPT2 BPE token ids in one s
 ```bash
 python train.py --config shakespeare
 ```
+
+## Train multi node in GCP cloud
+
+We can scale our training by using [TPU pod slices](https://cloud.google.com/tpu/docs/jax-pods) and TPU-VMs. In short, we deploy multiple workers and execute the training job on each worker and let pmap handle scaling.
+
+1. We'll be using TPU-v4. which requires a subnet in the zone `us-central2-b`. Follow the instructions for [Set up and prepare a Google Cloud project](https://cloud.google.com/tpu/docs/v4-users-guide#project-setup).
+
+1. Create an instance. Change `your_project_id` to yours. 
+
+    ```bash
+    export TPU_NAME=tpu-v4
+    export ZONE=us-central2-b
+    export RUNTIME_VERSION=tpu-vm-v4-base
+    export PROJECT_ID=<your_project_id>
+    export ACCELERATOR_TYPE=v4-16
+
+    gcloud compute tpus tpu-vm create ${TPU_NAME} \
+    --zone us-central2-b \
+    --accelerator-type ${ACCELERATOR_TYPE} \
+    --version ${RUNTIME_VERSION} \
+    --subnetwork=tpusubnet \
+    --network=tpu-network
+    ```
+
+1. In order to ssh into the machine, you might need to modify ~/.ssh/config. Change <your_user_name> with your computer's use name (echo ~/) add the following:
+
+    ```bash
+    Host tpu-v4
+    HostName 107.167.173.130
+    IdentityFile /Users/<your_user_name>/.ssh/google_compute_engine
+    ```
+
+1. As a test try to ssh. If this works, you're ready to move to the next steps.
+
+    ```bash
+    gcloud compute tpus tpu-vm ssh tpu-v4 --worker=0 --zone us-central2-b --project $PROJECT_ID
+    ```
+
+1. Now we’ll run a training job on multiple machines. First, install jax[tpu], clone the repository on all machines and install dependencies
+
+    ```bash
+    gcloud compute tpus tpu-vm ssh tpu-v4 --zone  us-central2-b --project $PROJECT_ID --worker=all --command="pip install 'jax[tpu]>=0.2.16' -f https://storage.googleapis.com/jax-releases/libtpu_releases.html"
+
+    gcloud compute tpus tpu-vm ssh tpu-v4 --zone  us-central2-b --project $PROJECT_ID --worker=all --command="git clone https://github.com/entrpn/jax-nanoGPT.git"
+
+    gcloud compute tpus tpu-vm ssh tpu-v4 --zone  us-central2-b --project $PROJECT_ID --worker=all --command="pip install -r jax-nanoGPT/requirements.txt"
+    ```
+
+1. Generate the dataset in all devices - (TODO : generate data on single drive and mount it to all instances)
+
+    ```bash
+    gcloud compute tpus tpu-vm ssh tpu-v4 --zone  us-central2-b --project $PROJECT_ID --worker=all --command="python3 jax-nanoGPT/data/openwebtext-10k/prepare.py"
+    ```
+
+1. Kick off training.
+
+    ```bash
+    gcloud compute tpus tpu-vm ssh tpu-v4 --zone  us-central2-b --project $PROJECT_ID --worker=all --command="cd jax-nanoGPT; python3 train.py --config openwebtext-10k"
+    ```
 
 ## Generate
 
@@ -50,7 +109,3 @@ Training with openwebtext10k dataset for 25k steps, where the last 50 characters
     <img height="1000" src="images/owt10k.png"></img>
 </br>
 </br>
-<p align="center">Training with the shakespeare dataset for 9600 steps.</p>
-<p align="center">
-    <img with="100" height="1000" src="images/logs.png"></img>
-</p>
