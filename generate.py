@@ -4,6 +4,7 @@ import jax
 from jax import random, lax
 import flax.linen as nn
 from flax.training import train_state, checkpoints
+from flax.serialization import to_bytes, from_bytes
 import orbax.checkpoint as orbax
 import jax.numpy as jnp
 import tiktoken
@@ -77,9 +78,13 @@ def main(opt):
     config.n_embd = model_config['n_embd']
     config.block_size = train_config['block_size']
 
-    raw_restored = checkpoints.restore_checkpoint(ckpt_dir=f'./out-{opt.config}/checkpoints/',step=opt.checkpoint_step, target=None)
-    # TODO - why are params being stored inside params?
-    params = raw_restored["model"]["params"]["params"]
+    rng = jax.random.PRNGKey(0)
+    rng, init_rng, dropout_rng = jax.random.split(rng, 3)
+    model = GPT(config)
+    params = model.init({'params' : rng, 'dropout' : dropout_rng}, jax.random.randint(init_rng, (1,config.block_size), minval=0,maxval=config.vocab_size))
+
+    with open(f'./out-{opt.config}/checkpoints/weights.msgpack','rb') as state_f:
+        params = from_bytes(params,state_f.read())['params']
 
     # Our model isn't trained with a pad token, so we'll use the eot token as a pad token. Although this is not ideal since we added eot tokens to the training data, it works for generation.
     pad_token=50256

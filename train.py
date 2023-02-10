@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import flax
 from flax.core.frozen_dict import unfreeze
 from flax.training import train_state, checkpoints
+from flax.serialization import to_bytes, from_bytes
 from flax import jax_utils
 from flax.jax_utils import unreplicate
 from flax.training.common_utils import shard, shard_prng_key
@@ -64,17 +65,23 @@ def train(opt):
     best_eval = 1e6
 
     # Checkpoints
-    checkpoint_path = os.path.join(out_dir,'checkpoints')
-    def restore_model(state, step=0):
-        state_restored = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_path, target=state, step=step)
-        return state_restored
+    checkpoint_path = os.path.join(out_dir,'checkpoints','weights.msgpack')
+    def restore_model(state,model,optimizer, step=0):
+        with open(checkpoint_path,"rb") as state_f:
+            params = from_bytes(state.params,state_f.read())
+        
+        state = train_state.TrainState.create(
+        apply_fn=model.apply, 
+        params=params, 
+        tx=optimizer)
+
+        return state
 
     def save_model(state, step=0):
-
-        ckpt = {'model' : state}
-        orbax_checkpointer = orbax.Checkpointer(orbax.PyTreeCheckpointHandler())
-
-        checkpoints.save_checkpoint(ckpt_dir=checkpoint_path, target=ckpt, prefix=f'checkpoint_',step=step,overwrite=True, keep=1, orbax_checkpointer=orbax_checkpointer)
+        print("Created async checkpointer")
+        with open(checkpoint_path,"wb") as f:
+            state_bytes = to_bytes(state.params)
+            f.write(state_bytes)
 
     # Generate
     gen_interval = train_config['gen_interval']
@@ -104,7 +111,6 @@ def train(opt):
     model = GPT(config)
     main_rng, init_rng, dropout_init_rng = jax.random.split(rng, 3)
     params = jax.jit(model.init)({'params' : init_rng, 'dropout' : dropout_init_rng}, jax.random.randint(init_rng, input_shape, minval=0,maxval=config.vocab_size))
-    # params = model.init(init_rng)
     print("Number of params : ",count_params(params))
     # Optimizer
     # learning rate decay settings
@@ -126,7 +132,6 @@ def train(opt):
         retval = {}
         for key in params.keys():
             val = params[key]
-            # print("prev_key:",prev_key," | key:",key," | val type: ",type(val)," | val:",val)
             if isinstance(val, flax.core.frozen_dict.FrozenDict):
                 retval[key] = create_adamw_mask(val,key)
             else:
@@ -235,12 +240,12 @@ def train(opt):
     p_eval_step = jax.pmap(eval_step, "batch")
 
     dropout_rngs = jax.random.split(rng, jax.local_device_count())
-
     for _ in range(max_iters):
         rng, input_rng = jax.random.split(rng)
 
         # Generate single example
-        if iter_num % gen_interval == 0:
+        if iter_num % gen_interval == 0 and jax.process_index() == 0:
+            print(f" {jax.process_index()} is generating")
             x,_ = get_batch('train',input_rng, 1)
             generation = temperature_sample(x, unreplicate(state).params['params'], config, max_new_tokens=50,temperature=1.0, top_k=20, rng=rng)
             generation = generation.squeeze()
@@ -249,7 +254,8 @@ def train(opt):
             writer.flush()
 
         # eval
-        if iter_num % eval_interval == 0:
+        if iter_num % eval_interval == 0 and jax.process_index() == 0:
+            print(f" {jax.process_index()} is evaluating")
             eval_metrics = evaluate(rng, p_eval_step, state.params['params'])
             train_loss = jax.device_get(eval_metrics['train'])
             val_loss = jax.device_get(eval_metrics['val'])
@@ -259,20 +265,22 @@ def train(opt):
             writer.add_scalar('lr', lr,global_step=iter_num)
             if val_loss < best_eval:
                 best_eval = val_loss
-                save_model(unreplicate(state), step=iter_num)
-                # Restore checkpoint to validate we can load checkpoints.
-                # state = restore_model(unreplicate(state), step=iter_num)
-                # state = jax_utils.replicate(state)
+                if jax.process_index() == 0:
+                    print("saving model")
+                    save_model(unreplicate(state), step=iter_num)
+                    # Restore checkpoint to validate we can load checkpoints.
+                    # Only here for example purposes, don't use as it will reset your state steps to 0 and learning rate.
+                    # state = restore_model(unreplicate(state), model, optimizer, step=iter_num)
+                    # state = jax_utils.replicate(state)
 
             writer.flush()
-
         # Train
         batch = get_batch('train',input_rng, train_batch_size)
         batch = shard(batch)
         state, train_metric = p_train_step(state, batch, dropout_rngs)
-        
         train_metric = unreplicate(train_metric)
-        print(f" iter {iter_num}, loss : {train_metric['loss']}, lr: {learning_rate_fn(state.step)}")
+        if jax.process_index() == 0:
+            print(f" iter {iter_num}, loss : {train_metric['loss']}, lr: {learning_rate_fn(state.step)}")
         iter_num+=1
 
 if __name__ == "__main__":
