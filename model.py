@@ -31,7 +31,7 @@ class CausalSelfAttention(nn.Module):
         qkv = self.c_attn(x)
 
         # Separate Q, K, V from linear output
-        qkv = qkv.reshape(B, T, 3*self.config.n_head, C//self.config.n_head)
+        qkv = qkv.reshape(B, T, self.config.n_head, -1)
         qkv = qkv.transpose(0,2,1,3) # [Batch, Head, SeqLen, Dims]
         q, k, v = jnp.array_split(qkv, 3, axis=1)
 
