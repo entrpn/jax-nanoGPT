@@ -1,6 +1,7 @@
 jax
 flax
-torch
+torch==1.9.0+cpu 
+-f https://download.pytorch.org/whl/torch_stable.html
 optax
 tiktoken
 tqdm

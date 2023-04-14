@@ -24,7 +24,6 @@ from configs.shakespeare import config as shakespeare_config
 from configs.openwebtext10k import config as openwebtext10k_config
 
 import tiktoken
-enc = tiktoken.get_encoding("gpt2")
 
 model_config_args = {
     'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
@@ -65,7 +64,9 @@ def train(opt):
     best_eval = 1e6
 
     # Checkpoints
-    checkpoint_path = os.path.join(out_dir,'checkpoints','weights.msgpack')
+    checkpoint_path = os.path.join(out_dir,'checkpoints')
+    os.makedirs(checkpoint_path,exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_path,'weights.msgpack')
     def restore_model(state,model,optimizer, step=0):
         with open(checkpoint_path,"rb") as state_f:
             params = from_bytes(state.params,state_f.read())
@@ -249,6 +250,7 @@ def train(opt):
             x,_ = get_batch('train',input_rng, 1)
             generation = temperature_sample(x, unreplicate(state).params['params'], config, max_new_tokens=50,temperature=1.0, top_k=20, rng=rng)
             generation = generation.squeeze()
+            enc = tiktoken.get_encoding("gpt2")
             generation = enc.decode(generation)
             log_generations(generation, iter_num)
             writer.flush()
